@@ -7,6 +7,9 @@ on:
     types: [opened, reopened, ready_for_review]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CFLAGS: -O2 -Wall -Wextra -std=c11 -pedantic -Werror
 
@@ -16,6 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - name: Build
         run: make
       - name: Test
@@ -31,6 +36,8 @@ jobs:
         shell: msys2 {0}
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64

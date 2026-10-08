@@ -26,6 +26,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false # the upload step passes its token itself
       - name: Check the version matches the tag
         shell: bash
         run: |
