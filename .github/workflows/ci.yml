@@ -1,0 +1,23 @@
+name: CI
+
+# Runs once per PR when it is ready to merge (opened as ready, or a draft
+# marked ready), not on every push. Re-run by hand with workflow_dispatch.
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  workflow_dispatch:
+
+jobs:
+  linux:
+    if: github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    env:
+      CFLAGS: -O2 -Wall -Wextra -std=c11 -pedantic -Werror
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: make
+      - name: Test
+        run: make test
+      - name: Version
+        run: ./termtris --version
