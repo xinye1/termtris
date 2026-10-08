@@ -401,6 +401,15 @@ static size_t parse(const unsigned char *b, size_t n, emit_fn emit)
 			i += 3;
 			continue;
 		}
+		if (b[i + 1] == ']') { /* OSC: a late theme reply, never a key */
+			size_t j = i + 2;
+			while (j < n && b[j] != 7 && !(b[j] == 27 && j + 1 < n && b[j + 1] == '\\'))
+				j++;
+			if (j == n || (b[j] == 27 && j + 1 == n))
+				return i;
+			i = j + (b[j] == 7 ? 1 : 2);
+			continue;
+		}
 		if (b[i + 1] != '[') { /* Alt+key: drop the Esc */
 			i++;
 			continue;
@@ -538,8 +547,15 @@ static bool hiscore_path(char *buf, size_t n, bool make_dir)
 		return false;
 	if (len < 0 || (size_t)len + sizeof "/highscore" > n)
 		return false;
-	if (make_dir)
-		mkdir(buf, 0755); /* fails harmlessly if it exists */
+	if (make_dir) /* mkdir -p; each call fails harmlessly if the folder exists */
+		for (char *p = buf + 1;; p++)
+			if (*p == '/' || !*p) {
+				char c = *p;
+				*p = 0;
+				mkdir(buf, 0700);
+				if (!(*p = c))
+					break;
+			}
 	strcat(buf, "/highscore");
 	return true;
 }

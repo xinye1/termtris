@@ -267,6 +267,19 @@ static void test_randomizer(void)
 	for (int p = 0; p < NPIECE; p++)
 		CHECK(seen[p] > 8000);
 	CHECK(repeats > 1000 && repeats < 4000); /* NES: about 1 in 28 */
+
+	/* same seed, same sequence: the other tests rely on it */
+	int seq[64];
+	bool same = true;
+	g.rng = 4242;
+	g.last_roll = -1;
+	for (int i = 0; i < 64; i++)
+		seq[i] = roll();
+	g.rng = 4242;
+	g.last_roll = -1;
+	for (int i = 0; i < 64; i++)
+		same &= roll() == seq[i];
+	CHECK(same);
 }
 
 static int evs[32][2], nev;
@@ -306,6 +319,35 @@ static void test_parser(void)
 	CHECK(nev == 1 && evs[0][0] == K_FOCUS_OUT);
 	CHECK(feed("x\x1b[1;1:") == 1); /* an unfinished sequence waits for more */
 	CHECK(nev == 1);
+	/* late theme replies (OSC) are swallowed whole, with either terminator */
+	feed("\x1b]4;1;rgb:cccc/2424/1d1d\x1b\\\x1b]11;rgb:28/28/28\x07q");
+	CHECK(nev == 1 && evs[0][0] == K_QUIT);
+	CHECK(feed("h\x1b]4;1;rgb:cc") == 1 && nev == 1); /* unfinished: wait */
+	CHECK(feed("\x1b]10;rgb:ebeb/dbdb/b2b2\x1b") == 0 && nev == 0);
+}
+
+static void test_hiscore(const char *dir)
+{
+	char xdg[512];
+	snprintf(xdg, sizeof xdg, "%s/no/such/share", dir); /* parents missing */
+	setenv("XDG_DATA_HOME", xdg, 1);
+	g.hiscore = 4321;
+	save_hiscore();
+	g.hiscore = 0;
+	load_hiscore();
+	CHECK(g.hiscore == 4321);
+
+	/* tidy up, deepest first */
+	static const char *const made[] = {
+		"/no/such/share/termtris/highscore", "/no/such/share/termtris",
+		"/no/such/share", "/no/such", "/no",
+	};
+	for (size_t i = 0; i < sizeof made / sizeof *made; i++) {
+		char path[600];
+		snprintf(path, sizeof path, "%s%s", dir, made[i]);
+		remove(path);
+	}
+	setenv("XDG_DATA_HOME", dir, 1);
 }
 
 static void test_song(void)
@@ -399,6 +441,7 @@ int main(void)
 	test_randomizer();
 	test_parser();
 	test_song();
+	test_hiscore(dir);
 	test_arrangement();
 	test_theme();
 
