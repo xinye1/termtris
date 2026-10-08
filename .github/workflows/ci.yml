@@ -42,3 +42,11 @@ jobs:
         run: make test LDFLAGS=-static
       - name: Version
         run: ./termtris.exe --version
+      - name: Starts in a real console
+        shell: pwsh
+        run: |
+          # A new console window: startup, VT mode, the colour probe and audio setup
+          $p = Start-Process -FilePath .\termtris.exe -PassThru
+          Start-Sleep -Seconds 3
+          if ($p.HasExited) { throw "termtris exited early with code $($p.ExitCode)" }
+          Stop-Process -Id $p.Id
