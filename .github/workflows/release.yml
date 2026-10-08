@@ -1,0 +1,61 @@
+name: Release
+
+# Builds the binaries for a published GitHub release and attaches them.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+env:
+  CFLAGS: -O2 -Wall -Wextra -std=c11 -pedantic -Werror
+  TAG: ${{ github.event.release.tag_name }}
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: termtris-linux-x86_64
+            built: termtris
+          - os: windows-latest
+            asset: termtris-windows-x86_64.exe
+            built: termtris.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check the version matches the tag
+        shell: bash
+        run: |
+          v=$(sed -n 's/^#define TERMTRIS_VERSION "\(.*\)"$/\1/p' termtris.c)
+          if [ "v$v" != "$TAG" ]; then
+            echo "termtris.c says $v but the release tag is $TAG"
+            exit 1
+          fi
+      - name: Build and test (Linux, static)
+        if: runner.os == 'Linux'
+        run: |
+          make LDFLAGS="-static -s"
+          make test
+      - uses: msys2/setup-msys2@v2
+        if: runner.os == 'Windows'
+        with:
+          msystem: UCRT64
+          update: false
+          install: mingw-w64-ucrt-x86_64-gcc make
+      - name: Build and test (Windows, static)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          make LDFLAGS="-static -s"
+          make test LDFLAGS=-static
+      - name: Upload to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp "${{ matrix.built }}" "${{ matrix.asset }}"
+          sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          gh release upload "$TAG" "${{ matrix.asset }}" "${{ matrix.asset }}.sha256" --clobber

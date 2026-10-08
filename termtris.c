@@ -4,33 +4,48 @@
  * Rules follow the 1989 NES game: Nintendo rotation (no wall kicks), the NES
  * gravity table, lock on contact, 40/100/300/1200 x (level+1) line scores and
  * a new level every 10 lines. The board is drawn like the 1984 original, and
- * the Game Boy's Korobeiniki theme plays from a tiny built-in synth.
+ * the Game Boy's Korobeiniki theme plays from a tiny built-in synth. It runs
+ * on Linux terminals and on the Windows console (PowerShell, Windows Terminal).
  *
  * Smoothness comes from three things: a fixed 60 Hz simulation clock, frames
  * that only send changed cells inside synchronized-output markers, and the
  * kitty keyboard protocol. That protocol reports key releases, so auto-shift
  * timing is ours instead of the OS key-repeat's. Terminals without it fall
- * back to plain keys, where holding a key relies on the OS repeat.
+ * back to plain keys, where holding a key relies on the OS repeat. The Windows
+ * console reports key releases natively.
  */
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <mmsystem.h>
+#include <direct.h>
+#else
 #define _GNU_SOURCE
-#include <ctype.h>
-#include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/ioctl.h>
+#include <sys/prctl.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <termios.h>
+#include <unistd.h>
+#endif
+#include <ctype.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
-#include <sys/prctl.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <termios.h>
 #include <time.h>
-#include <unistd.h>
+
+#if defined(__GNUC__) || defined(__clang__)
+#define MAYBE_UNUSED __attribute__((unused))
+#else
+#define MAYBE_UNUSED
+#endif
 
 /* Bumped for each release; the release workflow checks it matches the tag. */
 #define TERMTRIS_VERSION "0.1.0-beta.2"
@@ -308,7 +323,7 @@ static bool tick(void)
 enum { EV_PRESS = 1, EV_REPEAT = 2, EV_RELEASE = 3 };
 enum {
 	K_NONE, K_LEFT, K_RIGHT, K_DOWN, K_CW, K_CCW, K_DROP, K_PAUSE, K_QUIT,
-	K_GHOST, K_NEXT, K_STYLE, K_ENTER, K_RESTART, K_MUSIC, K_FOCUS_OUT,
+	K_GHOST, K_NEXT, K_STYLE, K_ENTER, K_RESTART, K_MUSIC, K_FOCUS_OUT, K_COUNT,
 };
 typedef void (*emit_fn)(int key, int ev);
 
@@ -379,8 +394,11 @@ static void handle_csi(const unsigned char *p, size_t n, int final, emit_fn emit
 		emit(k, ev);
 }
 
-/* Parse terminal input. Returns bytes consumed; the rest is an unfinished sequence. */
-static size_t parse(const unsigned char *b, size_t n, emit_fn emit)
+/*
+ * Parse terminal input. Returns bytes consumed; the rest is an unfinished
+ * sequence. (Unused on Windows, which delivers keys as console records.)
+ */
+static MAYBE_UNUSED size_t parse(const unsigned char *b, size_t n, emit_fn emit)
 {
 	size_t i = 0;
 	while (i < n) {
@@ -542,22 +560,33 @@ static void on_key(int k, int ev)
 
 static bool hiscore_path(char *buf, size_t n, bool make_dir)
 {
-	const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
 	int len;
+#ifdef _WIN32
+	const char *appdata = getenv("APPDATA");
+	if (!appdata || !*appdata)
+		return false;
+	len = snprintf(buf, n, "%s\\termtris", appdata);
+#else
+	const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
 	if (xdg && *xdg)
 		len = snprintf(buf, n, "%s/termtris", xdg);
 	else if (home && *home)
 		len = snprintf(buf, n, "%s/.local/share/termtris", home);
 	else
 		return false;
+#endif
 	if (len < 0 || (size_t)len + sizeof "/highscore" > n)
 		return false;
 	if (make_dir) /* mkdir -p; each call fails harmlessly if the folder exists */
 		for (char *p = buf + 1;; p++)
-			if (*p == '/' || !*p) {
+			if (*p == '/' || *p == '\\' || !*p) {
 				char c = *p;
 				*p = 0;
+#ifdef _WIN32
+				_mkdir(buf);
+#else
 				mkdir(buf, 0700);
+#endif
 				if (!(*p = c))
 					break;
 			}
@@ -713,6 +742,8 @@ enum { BOARD_W = 2 * W + 4, LAYOUT_W = BOARD_W + 2 + 22, LAYOUT_H = H + 2 };
 
 static int scr_w, scr_h;
 static Cell *back, *front;
+static void term_write(const char *s, size_t n);
+static void term_size(int *w, int *h);
 static bool full_redraw;
 static char *ob;
 static size_t ob_len, ob_cap;
@@ -957,12 +988,7 @@ static void flush(void)
 			*f = *b;
 		}
 	obs("\x1b[0m\x1b[?2026l");
-	for (size_t off = 0; off < ob_len;) {
-		ssize_t n = write(STDOUT_FILENO, ob + off, ob_len - off);
-		if (n < 0 && errno != EINTR)
-			break;
-		off += n > 0 ? (size_t)n : 0;
-	}
+	term_write(ob, ob_len);
 	full_redraw = false;
 }
 
@@ -985,11 +1011,7 @@ static void render(void)
 
 static void resize(void)
 {
-	struct winsize ws;
-	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) || !ws.ws_col || !ws.ws_row)
-		ws = (struct winsize){ .ws_row = 24, .ws_col = 80 };
-	scr_w = ws.ws_col;
-	scr_h = ws.ws_row;
+	term_size(&scr_w, &scr_h);
 	free(back);
 	free(front);
 	back = calloc((size_t)scr_w * scr_h, sizeof *back);
@@ -1042,30 +1064,8 @@ enum {
 	PASSES = sizeof passes / sizeof *passes,
 };
 
-static pid_t synth_pid = -1, player_pid = -1;
 static bool music_playing;
 static int music_game;
-static volatile sig_atomic_t music_rewind;
-
-static void on_rewind(int sig)
-{
-	(void)sig;
-	music_rewind = 1;
-}
-
-static void write_or_die(int fd, const void *buf, size_t n)
-{
-	const char *p = buf;
-	while (n) {
-		ssize_t w = write(fd, p, n);
-		if (w < 0 && errno == EINTR)
-			continue;
-		if (w <= 0)
-			_exit(0); /* the player is gone */
-		p += w;
-		n -= w;
-	}
-}
 
 /* The nearest tone of the bar's chord at least a minor third below m. */
 static int harmony_note(int m, int bar)
@@ -1088,15 +1088,17 @@ static double note_env(long t, long len, int fade)
 	return env;
 }
 
-/* The synth process: loops the arranged cycle forever into fd. */
-static void synth_main(int fd)
-{
-	enum { CHUNK = RATE / 50, FADE = RATE / 400 };
-	enum { PASS = SONG_EIGHTHS * EIGHTH, CYCLE = PASSES * PASS };
-	double hz[128], pm = 0, p2 = 0, pb = 0, lp = 0;
-	int16_t buf[CHUNK];
-	unsigned char note_of[SONG_EIGHTHS], start_of[SONG_EIGHTHS];
+/* Where the synth is in the cycle, and its oscillator and filter state. */
+typedef struct {
+	long pos;
+	double pm, p2, pb, lp;
+} Synth;
 
+static double hz[128];
+static unsigned char note_of[SONG_EIGHTHS], start_of[SONG_EIGHTHS];
+
+static void synth_init(void)
+{
 	hz[69] = 440.0;
 	for (int n = 70; n < 128; n++)
 		hz[n] = hz[n - 1] * 1.0594630943592953;
@@ -1108,63 +1110,110 @@ static void synth_main(int fd)
 			note_of[at + k] = i;
 			start_of[at + k] = at;
 		}
+}
 
-	for (;;) {
-		music_rewind = 0;
-		for (long pos = 0; pos < CYCLE && !music_rewind;) {
-			int n = 0;
-			for (; n < CHUNK && pos < CYCLE; n++, pos++) {
-				const struct pass *ps = &passes[pos / PASS];
-				long pp = pos % PASS, step = pp / EIGHTH;
-				int bar = step / 8;
-				double s = 0;
+/* Render the next n samples of the arranged cycle, looping at its end. */
+static void synth_render(Synth *sy, int16_t *buf, int n)
+{
+	enum { FADE = RATE / 400, PASS = SONG_EIGHTHS * EIGHTH, CYCLE = PASSES * PASS };
+	for (int k = 0; k < n; k++, sy->pos = (sy->pos + 1) % CYCLE) {
+		const struct pass *ps = &passes[sy->pos / PASS];
+		long pp = sy->pos % PASS, step = pp / EIGHTH;
+		int bar = step / 8;
+		double s = 0;
 
-				/* lead: 25% pulse */
-				int i = note_of[step], note = melody[i][0];
-				long t = pp - start_of[step] * EIGHTH, len = melody[i][1] * EIGHTH;
-				if (note) {
-					pm += hz[note + ps->shift] / RATE;
-					pm -= pm >= 1;
-					s += (pm < 0.25 ? 0.75 : -0.25) * 0.16 * note_env(t, len, FADE);
-				}
-
-				/* second voice: 12.5% pulse, harmony or an echo an eighth behind */
-				int note2 = 0;
-				double vol2 = 0;
-				if (ps->harmony && note) {
-					note2 = harmony_note(note + ps->shift, bar);
-					vol2 = 0.10;
-				} else if (ps->echo && pp >= EIGHTH) {
-					long ep = pp - EIGHTH, es = ep / EIGHTH;
-					i = note_of[es];
-					note2 = melody[i][0];
-					t = ep - start_of[es] * EIGHTH;
-					len = melody[i][1] * EIGHTH;
-					vol2 = 0.07;
-				}
-				if (note2) {
-					p2 += hz[note2] / RATE;
-					p2 -= p2 >= 1;
-					s += (p2 < 0.125 ? 0.875 : -0.125) * vol2 * note_env(t, len, FADE);
-				}
-
-				/* bass: triangle, octave pumps or root-fifth-octave-fifth */
-				static const int walk[4] = { 0, 7, 12, 7 };
-				long ts = pp % EIGHTH, on = EIGHTH * 7 / 10;
-				int bn = bass_root[bar] + (ps->walk ? walk[step % 4] : 12 * (step % 2));
-				pb += hz[bn] / RATE;
-				pb -= pb >= 1;
-				double benv = ts < FADE ? (double)ts / FADE
-					      : ts < on - FADE ? 1
-					      : ts < on ? (double)(on - ts) / FADE : 0;
-				double tri = pb < 0.5 ? 4 * pb - 1 : 3 - 4 * pb;
-				s += tri * 0.11 * benv;
-
-				lp += 0.45 * (s - lp); /* soften the square edges */
-				buf[n] = (int16_t)(lp * 32767);
-			}
-			write_or_die(fd, buf, n * sizeof *buf);
+		/* lead: 25% pulse */
+		int i = note_of[step], note = melody[i][0];
+		long t = pp - start_of[step] * EIGHTH, len = melody[i][1] * EIGHTH;
+		if (note) {
+			sy->pm += hz[note + ps->shift] / RATE;
+			sy->pm -= sy->pm >= 1;
+			s += (sy->pm < 0.25 ? 0.75 : -0.25) * 0.16 * note_env(t, len, FADE);
 		}
+
+		/* second voice: 12.5% pulse, harmony or an echo an eighth behind */
+		int note2 = 0;
+		double vol2 = 0;
+		if (ps->harmony && note) {
+			note2 = harmony_note(note + ps->shift, bar);
+			vol2 = 0.10;
+		} else if (ps->echo && pp >= EIGHTH) {
+			long ep = pp - EIGHTH, es = ep / EIGHTH;
+			i = note_of[es];
+			note2 = melody[i][0];
+			t = ep - start_of[es] * EIGHTH;
+			len = melody[i][1] * EIGHTH;
+			vol2 = 0.07;
+		}
+		if (note2) {
+			sy->p2 += hz[note2] / RATE;
+			sy->p2 -= sy->p2 >= 1;
+			s += (sy->p2 < 0.125 ? 0.875 : -0.125) * vol2 * note_env(t, len, FADE);
+		}
+
+		/* bass: triangle, octave pumps or root-fifth-octave-fifth */
+		static const int walk[4] = { 0, 7, 12, 7 };
+		long ts = pp % EIGHTH, on = EIGHTH * 7 / 10;
+		int bn = bass_root[bar] + (ps->walk ? walk[step % 4] : 12 * (step % 2));
+		sy->pb += hz[bn] / RATE;
+		sy->pb -= sy->pb >= 1;
+		double benv = ts < FADE ? (double)ts / FADE
+			      : ts < on - FADE ? 1
+			      : ts < on ? (double)(on - ts) / FADE : 0;
+		double tri = sy->pb < 0.5 ? 4 * sy->pb - 1 : 3 - 4 * sy->pb;
+		s += tri * 0.11 * benv;
+
+		sy->lp += 0.45 * (s - sy->lp); /* soften the square edges */
+		buf[k] = (int16_t)(sy->lp * 32767);
+	}
+}
+
+/*
+ * Each platform provides music_start, music_stop, music_alive (false once
+ * audio is unavailable), music_play (pause or resume) and music_restart
+ * (back to the top of the cycle).
+ */
+#ifndef _WIN32
+
+/*
+ * A synth process loops the cycle into a pipe read by pw-play, paplay or
+ * aplay. SIGSTOP/SIGCONT pause it; SIGUSR1 rewinds it.
+ */
+static pid_t synth_pid = -1, player_pid = -1;
+static volatile sig_atomic_t music_rewind;
+
+static void on_rewind(int sig)
+{
+	(void)sig;
+	music_rewind = 1;
+}
+
+static void write_or_die(int fd, const void *buf, size_t n)
+{
+	const char *p = buf;
+	while (n) {
+		ssize_t w = write(fd, p, n);
+		if (w < 0 && errno == EINTR)
+			continue;
+		if (w <= 0)
+			_exit(0); /* the player is gone */
+		p += w;
+		n -= w;
+	}
+}
+
+static void synth_main(int fd)
+{
+	int16_t buf[RATE / 50];
+	Synth sy = { 0 };
+	synth_init();
+	for (;;) {
+		if (music_rewind) {
+			music_rewind = 0;
+			sy.pos = 0;
+		}
+		synth_render(&sy, buf, sizeof buf / sizeof *buf);
+		write_or_die(fd, buf, sizeof buf);
 	}
 }
 
@@ -1238,36 +1287,180 @@ static void music_start(void)
 	atexit(music_stop);
 }
 
-/* Play only while a game is running; start the tune over for each new game. */
-static void music_sync(void)
+static bool music_alive(void)
 {
 	if (synth_pid <= 0)
-		return;
+		return false;
 	if (waitpid(player_pid, NULL, WNOHANG) == player_pid) { /* no audio player */
 		player_pid = -1;
 		music_stop();
+		return false;
+	}
+	return true;
+}
+
+static void music_play(bool on) { kill(synth_pid, on ? SIGCONT : SIGSTOP); }
+static void music_restart(void) { kill(synth_pid, SIGUSR1); }
+
+#else /* _WIN32 */
+
+/*
+ * A thread keeps a few short buffers queued on the default audio device;
+ * waveOutPause/waveOutRestart pause and resume it. The lock keeps a rewind
+ * from racing a buffer the thread is filling.
+ */
+enum { WAVE_BUFS = 4, WAVE_LEN = RATE / 25 }; /* 4 x 40 ms */
+static HWAVEOUT wave;
+static HANDLE wave_event, wave_thread;
+static CRITICAL_SECTION wave_lock;
+static WAVEHDR wave_hdr[WAVE_BUFS];
+static int16_t wave_buf[WAVE_BUFS][WAVE_LEN];
+static Synth wave_synth;
+static volatile LONG wave_quit;
+
+static DWORD WINAPI wave_main(LPVOID arg)
+{
+	(void)arg;
+	while (!wave_quit) {
+		EnterCriticalSection(&wave_lock);
+		for (int i = 0; i < WAVE_BUFS; i++)
+			if (wave_hdr[i].dwFlags & WHDR_DONE) {
+				synth_render(&wave_synth, wave_buf[i], WAVE_LEN);
+				wave_hdr[i].dwFlags &= ~WHDR_DONE;
+				waveOutWrite(wave, &wave_hdr[i], sizeof wave_hdr[i]);
+			}
+		LeaveCriticalSection(&wave_lock);
+		WaitForSingleObject(wave_event, INFINITE);
+	}
+	return 0;
+}
+
+static void music_stop(void)
+{
+	if (!wave)
+		return;
+	wave_quit = 1;
+	SetEvent(wave_event);
+	WaitForSingleObject(wave_thread, INFINITE);
+	waveOutReset(wave);
+	for (int i = 0; i < WAVE_BUFS; i++)
+		waveOutUnprepareHeader(wave, &wave_hdr[i], sizeof wave_hdr[i]);
+	waveOutClose(wave);
+	wave = NULL;
+}
+
+static void music_start(void)
+{
+	WAVEFORMATEX fmt = {
+		.wFormatTag = WAVE_FORMAT_PCM, .nChannels = 1, .nSamplesPerSec = RATE,
+		.nAvgBytesPerSec = RATE * 2, .nBlockAlign = 2, .wBitsPerSample = 16,
+	};
+	synth_init();
+	wave_event = CreateEventA(NULL, FALSE, FALSE, NULL);
+	if (!wave_event || waveOutOpen(&wave, WAVE_MAPPER, &fmt, (DWORD_PTR)wave_event, 0,
+				       CALLBACK_EVENT) != MMSYSERR_NOERROR) {
+		wave = NULL;
 		return;
 	}
+	waveOutPause(wave); /* silent until the first game */
+	InitializeCriticalSection(&wave_lock);
+	for (int i = 0; i < WAVE_BUFS; i++) {
+		wave_hdr[i] = (WAVEHDR){ .lpData = (LPSTR)wave_buf[i], .dwBufferLength = sizeof wave_buf[i] };
+		waveOutPrepareHeader(wave, &wave_hdr[i], sizeof wave_hdr[i]);
+		wave_hdr[i].dwFlags |= WHDR_DONE; /* free to fill */
+	}
+	wave_thread = CreateThread(NULL, 0, wave_main, NULL, 0, NULL);
+	if (!wave_thread) {
+		waveOutClose(wave);
+		wave = NULL;
+		return;
+	}
+	atexit(music_stop);
+}
+
+static bool music_alive(void) { return wave != NULL; }
+
+static void music_play(bool on)
+{
+	if (on)
+		waveOutRestart(wave);
+	else
+		waveOutPause(wave);
+}
+
+static void music_restart(void)
+{
+	EnterCriticalSection(&wave_lock);
+	waveOutReset(wave); /* drop queued audio; buffers come back marked done */
+	wave_synth.pos = 0;
+	if (!music_playing)
+		waveOutPause(wave);
+	LeaveCriticalSection(&wave_lock);
+	SetEvent(wave_event);
+}
+
+#endif
+
+/* Play only while a game is running; start the tune over for each new game. */
+static void music_sync(void)
+{
+	if (!music_alive())
+		return;
 	if (g.games != music_game) {
 		music_game = g.games;
-		kill(synth_pid, SIGUSR1);
+		music_restart();
 	}
 	bool want = g.music && (g.state == ST_PLAY || g.state == ST_CLEAR);
 	if (want != music_playing) {
-		kill(synth_pid, want ? SIGCONT : SIGSTOP);
+		music_play(want);
 		music_playing = want;
 	}
 }
 
 /* ---- terminal ---------------------------------------------------------- */
 
+/*
+ * Each platform provides term_init/term_restore, term_write, term_size,
+ * term_resized, probe_terminal (theme colours; true if key releases are
+ * reported), input_wait (until input or a timeout, -1 for none) and
+ * input_read (false once input is gone).
+ */
+static bool term_active, force_basic;
+
+static bool has_reply(const char *b, size_t n, char final)
+{
+	for (size_t i = 0; i + 2 < n; i++) {
+		if (b[i] != 27 || b[i + 1] != '[' || b[i + 2] != '?')
+			continue;
+		size_t j = i + 3;
+		while (j < n && (isdigit((unsigned char)b[j]) || b[j] == ';'))
+			j++;
+		if (j < n && b[j] == final)
+			return true;
+	}
+	return false;
+}
+
+/* The theme queries: palette slots the pieces use, then fg and bg. */
+static void wr(const char *s);
+static void query_theme(void)
+{
+	static const int slots[] = { 1, 2, 3, 4, 5, 6, 11 };
+	for (size_t i = 0; i < sizeof slots / sizeof *slots; i++) {
+		char q[16];
+		snprintf(q, sizeof q, "\x1b]4;%d;?\x1b\\", slots[i]);
+		wr(q);
+	}
+	wr("\x1b]10;?\x1b\\\x1b]11;?\x1b\\");
+}
+
+#ifndef _WIN32
+
 static struct termios orig_tio;
-static bool term_active;
 static volatile sig_atomic_t got_quit, got_winch;
 
-static void wr(const char *s)
+static void term_write(const char *s, size_t n)
 {
-	size_t n = strlen(s);
 	while (n) {
 		ssize_t w = write(STDOUT_FILENO, s, n);
 		if (w < 0 && errno != EINTR)
@@ -1298,6 +1491,8 @@ static void on_signal(int sig)
 		got_quit = 1;
 }
 
+static bool is_terminal(void) { return isatty(STDIN_FILENO) && isatty(STDOUT_FILENO); }
+
 static void term_init(void)
 {
 	struct termios raw;
@@ -1321,6 +1516,23 @@ static void term_init(void)
 	wr("\x1b[?1049h\x1b[?25l\x1b[?1004h");
 }
 
+static void term_size(int *w, int *h)
+{
+	struct winsize ws;
+	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) || !ws.ws_col || !ws.ws_row)
+		ws = (struct winsize){ .ws_row = 24, .ws_col = 80 };
+	*w = ws.ws_col;
+	*h = ws.ws_row;
+}
+
+static bool term_resized(void)
+{
+	if (!got_winch)
+		return false;
+	got_winch = 0;
+	return true;
+}
+
 static int64_t now_ns(void)
 {
 	struct timespec t;
@@ -1328,38 +1540,21 @@ static int64_t now_ns(void)
 	return (int64_t)t.tv_sec * 1000000000 + t.tv_nsec;
 }
 
-static bool has_reply(const char *b, size_t n, char final)
-{
-	for (size_t i = 0; i + 2 < n; i++) {
-		if (b[i] != 27 || b[i + 1] != '[' || b[i + 2] != '?')
-			continue;
-		size_t j = i + 3;
-		while (j < n && (isdigit((unsigned char)b[j]) || b[j] == ';'))
-			j++;
-		if (j < n && b[j] == final)
-			return true;
-	}
-	return false;
-}
+static uint32_t process_id(void) { return (uint32_t)getpid(); }
 
 /*
  * Ask for the theme colours and the kitty keyboard flags, then for the device
  * attributes that every terminal answers. Replies come back in order, so once
  * the device attributes arrive everything else that will come has come. A
- * flags reply means the keyboard protocol works.
+ * flags reply means the keyboard protocol works; if so, switch it on.
  */
 static bool probe_terminal(void)
 {
 	char buf[2048];
 	size_t n = 0;
 	int64_t deadline = now_ns() + 500000000;
-	static const int slots[] = { 1, 2, 3, 4, 5, 6, 11 };
-	for (size_t i = 0; i < sizeof slots / sizeof *slots; i++) {
-		char q[16];
-		snprintf(q, sizeof q, "\x1b]4;%d;?\x1b\\", slots[i]);
-		wr(q);
-	}
-	wr("\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?u\x1b[c");
+	query_theme();
+	wr("\x1b[?u\x1b[c");
 	while (n < sizeof buf && !has_reply(buf, n, 'c')) {
 		int64_t left = deadline - now_ns();
 		if (left <= 0)
@@ -1372,19 +1567,251 @@ static bool probe_terminal(void)
 			n += r;
 	}
 	parse_theme(buf, n);
-	return has_reply(buf, n, 'u');
+	if (!has_reply(buf, n, 'u') || force_basic)
+		return false;
+	wr("\x1b[>11u"); /* disambiguate + report releases + all keys as escapes */
+	return true;
 }
+
+static bool input_wait(int64_t ns)
+{
+	struct timespec ts = { ns / 1000000000, ns % 1000000000 };
+	struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN };
+	return ppoll(&pfd, 1, ns < 0 ? NULL : &ts, NULL) > 0;
+}
+
+static bool input_read(void)
+{
+	static unsigned char in[256];
+	static size_t pend;
+	ssize_t n = read(STDIN_FILENO, in + pend, sizeof in - pend);
+	if (n == 0 || (n < 0 && errno != EINTR && errno != EAGAIN))
+		return false; /* hung up */
+	if (n > 0) {
+		pend += n;
+		size_t used = parse(in, pend, on_key);
+		memmove(in, in + used, pend - used);
+		pend -= used;
+		if (pend == sizeof in) /* garbage that never completes */
+			pend = 0;
+	}
+	return true;
+}
+
+#else /* _WIN32 */
+
+static HANDLE hin, hout, quit_event;
+static DWORD orig_in_mode, orig_out_mode;
+static UINT orig_cp;
+static volatile LONG got_quit;
+static bool key_down[K_COUNT];
+
+static void term_write(const char *s, size_t n)
+{
+	while (n) {
+		DWORD w;
+		if (!WriteFile(hout, s, (DWORD)n, &w, NULL) || !w)
+			return;
+		s += w;
+		n -= w;
+	}
+}
+
+static void term_restore(void)
+{
+	if (!term_active)
+		return;
+	term_active = false;
+	wr("\x1b[0m\x1b[?25h\x1b[?1049l");
+	SetConsoleMode(hin, orig_in_mode);
+	SetConsoleMode(hout, orig_out_mode);
+	SetConsoleOutputCP(orig_cp);
+	timeEndPeriod(1);
+}
+
+static BOOL WINAPI on_ctrl(DWORD type)
+{
+	(void)type; /* Ctrl+Break, closing the window, logoff, shutdown */
+	got_quit = 1;
+	SetEvent(quit_event);
+	return TRUE;
+}
+
+static bool is_terminal(void)
+{
+	DWORD mode;
+	hin = GetStdHandle(STD_INPUT_HANDLE);
+	hout = GetStdHandle(STD_OUTPUT_HANDLE);
+	return GetConsoleMode(hin, &mode) && GetConsoleMode(hout, &mode);
+}
+
+static void term_init(void)
+{
+	GetConsoleMode(hin, &orig_in_mode);
+	GetConsoleMode(hout, &orig_out_mode);
+	if (!SetConsoleMode(hout, orig_out_mode | ENABLE_PROCESSED_OUTPUT |
+					  ENABLE_VIRTUAL_TERMINAL_PROCESSING |
+					  DISABLE_NEWLINE_AUTO_RETURN)) {
+		fputs("termtris: this console has no VT support (needs Windows 10 or newer)\n", stderr);
+		exit(1);
+	}
+	orig_cp = GetConsoleOutputCP();
+	SetConsoleOutputCP(CP_UTF8);
+	/* keys as records (Ctrl+C included), resizes reported, no quick-edit pauses */
+	SetConsoleMode(hin, ENABLE_WINDOW_INPUT | ENABLE_EXTENDED_FLAGS);
+	quit_event = CreateEventA(NULL, TRUE, FALSE, NULL);
+	SetConsoleCtrlHandler(on_ctrl, TRUE);
+	timeBeginPeriod(1); /* millisecond waits for 60 Hz frames */
+	term_active = true;
+	atexit(term_restore);
+	wr("\x1b[?1049h\x1b[?25l");
+}
+
+static void term_size(int *w, int *h)
+{
+	CONSOLE_SCREEN_BUFFER_INFO info;
+	if (!GetConsoleScreenBufferInfo(hout, &info)) {
+		*w = 80;
+		*h = 24;
+		return;
+	}
+	*w = info.srWindow.Right - info.srWindow.Left + 1;
+	*h = info.srWindow.Bottom - info.srWindow.Top + 1;
+}
+
+static bool term_resized(void)
+{
+	int w, h;
+	term_size(&w, &h);
+	return w != scr_w || h != scr_h;
+}
+
+static int64_t now_ns(void)
+{
+	LARGE_INTEGER c, f;
+	QueryPerformanceCounter(&c);
+	QueryPerformanceFrequency(&f);
+	return c.QuadPart / f.QuadPart * 1000000000 + c.QuadPart % f.QuadPart * 1000000000 / f.QuadPart;
+}
+
+static uint32_t process_id(void) { return (uint32_t)GetCurrentProcessId(); }
+
+/*
+ * The console answers queries by injecting the reply as typed characters, so
+ * collect those until the device-attributes reply arrives. Key releases are
+ * not probed: the first one that arrives switches precise keys on.
+ */
+static bool probe_terminal(void)
+{
+	char buf[2048];
+	size_t n = 0;
+	int64_t deadline = now_ns() + 500000000;
+	SetConsoleMode(hin, ENABLE_WINDOW_INPUT | ENABLE_EXTENDED_FLAGS | ENABLE_VIRTUAL_TERMINAL_INPUT);
+	query_theme();
+	wr("\x1b[c");
+	while (n + 4 < sizeof buf && !has_reply(buf, n, 'c')) {
+		int64_t left = deadline - now_ns();
+		if (left <= 0 || WaitForSingleObject(hin, (DWORD)(left / 1000000) + 1) != WAIT_OBJECT_0)
+			break;
+		INPUT_RECORD rec[64];
+		DWORD got = 0;
+		if (!ReadConsoleInputW(hin, rec, 64, &got))
+			break;
+		for (DWORD i = 0; i < got && n + 4 < sizeof buf; i++) {
+			KEY_EVENT_RECORD *ke = &rec[i].Event.KeyEvent;
+			if (rec[i].EventType == KEY_EVENT && ke->bKeyDown && ke->uChar.UnicodeChar &&
+			    ke->uChar.UnicodeChar < 128)
+				buf[n++] = (char)ke->uChar.UnicodeChar;
+		}
+	}
+	SetConsoleMode(hin, ENABLE_WINDOW_INPUT | ENABLE_EXTENDED_FLAGS);
+	parse_theme(buf, n);
+	return false;
+}
+
+static int key_for_vk(WORD vk, bool ctrl)
+{
+	switch (vk) {
+	case VK_LEFT: return K_LEFT;
+	case VK_RIGHT: return K_RIGHT;
+	case VK_DOWN: return K_DOWN;
+	case VK_UP: return K_CW;
+	case VK_SPACE: return K_DROP;
+	case VK_RETURN: return K_ENTER;
+	case VK_ESCAPE: return K_PAUSE;
+	}
+	if (vk >= 'A' && vk <= 'Z')
+		return key_for_char(vk - 'A' + 'a', ctrl);
+	return K_NONE;
+}
+
+/*
+ * One console input record. Consoles that report key releases (conhost,
+ * Windows Terminal) get precise keys from the first release on; until then,
+ * or with --basic-keys, every press and OS repeat counts as a press.
+ */
+static void handle_record(const INPUT_RECORD *rec)
+{
+	if (rec->EventType == FOCUS_EVENT && !rec->Event.FocusEvent.bSetFocus) {
+		memset(key_down, 0, sizeof key_down);
+		on_key(K_FOCUS_OUT, EV_PRESS);
+		return;
+	}
+	if (rec->EventType != KEY_EVENT)
+		return;
+	const KEY_EVENT_RECORD *ke = &rec->Event.KeyEvent;
+	bool ctrl = ke->dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
+	int k = key_for_vk(ke->wVirtualKeyCode, ctrl);
+	if (!ke->bKeyDown) {
+		if (!force_basic)
+			g.precise = true;
+		if (k && key_down[k]) {
+			key_down[k] = false;
+			on_key(k, EV_RELEASE);
+		}
+		return;
+	}
+	if (!k)
+		return;
+	if (!g.precise) {
+		for (WORD r = 0; r < (ke->wRepeatCount ? ke->wRepeatCount : 1); r++)
+			on_key(k, EV_PRESS);
+		key_down[k] = true;
+		return;
+	}
+	on_key(k, key_down[k] ? EV_REPEAT : EV_PRESS);
+	key_down[k] = true;
+}
+
+static bool input_wait(int64_t ns)
+{
+	HANDLE hs[2] = { hin, quit_event };
+	DWORD ms = ns < 0 ? INFINITE : (DWORD)((ns + 999999) / 1000000);
+	return WaitForMultipleObjects(2, hs, FALSE, ms) == WAIT_OBJECT_0;
+}
+
+static bool input_read(void)
+{
+	INPUT_RECORD rec[64];
+	DWORD got = 0;
+	if (!ReadConsoleInputW(hin, rec, 64, &got))
+		return false;
+	for (DWORD i = 0; i < got; i++)
+		handle_record(&rec[i]);
+	return true;
+}
+
+#endif
+
+static void wr(const char *s) { term_write(s, strlen(s)); }
 
 static void run(void)
 {
-	unsigned char in[256];
-	size_t pend = 0;
 	int64_t next = now_ns();
 	bool dirty = true;
 
 	while (!got_quit && !g.quit) {
-		if (got_winch) {
-			got_winch = 0;
+		if (term_resized()) {
 			resize();
 			dirty = true;
 		}
@@ -1393,30 +1820,17 @@ static void run(void)
 		dirty = false;
 		music_sync();
 
+		/* idle screens sleep until a key; live ones until the next frame */
 		bool was_live = g.state == ST_PLAY || g.state == ST_CLEAR;
-		struct timespec ts, *tp = NULL; /* idle screens sleep until a key */
+		int64_t wait = -1;
 		if (was_live) {
-			int64_t d = next - now_ns();
-			d = d < 0 ? 0 : d;
-			ts = (struct timespec){ d / 1000000000, d % 1000000000 };
-			tp = &ts;
+			wait = next - now_ns();
+			wait = wait < 0 ? 0 : wait;
 		}
-		struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN };
-		if (ppoll(&pfd, 1, tp, NULL) > 0) {
-			if (pfd.revents & (POLLHUP | POLLERR))
+		if (input_wait(wait)) {
+			if (!input_read())
 				break;
-			ssize_t n = read(STDIN_FILENO, in + pend, sizeof in - pend);
-			if (n == 0)
-				break;
-			if (n > 0) {
-				pend += n;
-				size_t used = parse(in, pend, on_key);
-				memmove(in, in + used, pend - used);
-				pend -= used;
-				if (pend == sizeof in) /* garbage that never completes */
-					pend = 0;
-				dirty = true;
-			}
+			dirty = true;
 		}
 
 		bool live = g.state == ST_PLAY || g.state == ST_CLEAR;
@@ -1438,11 +1852,10 @@ static void run(void)
 #ifndef TERMTRIS_NO_MAIN
 int main(int argc, char **argv)
 {
-	bool basic = false;
 	g.music = true;
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--basic-keys")) {
-			basic = true;
+			force_basic = true;
 		} else if (!strcmp(argv[i], "--no-music")) {
 			g.music = false;
 		} else if (!strcmp(argv[i], "-v") || !strcmp(argv[i], "--version")) {
@@ -1452,30 +1865,28 @@ int main(int argc, char **argv)
 			bool help = !strcmp(argv[i], "-h") || !strcmp(argv[i], "--help");
 			fprintf(help ? stdout : stderr,
 				"usage: termtris [--basic-keys] [--no-music] [--version]\n"
-				"  --basic-keys  ignore the kitty keyboard protocol and use plain key presses\n"
+				"  --basic-keys  ignore key releases and use plain key presses\n"
 				"  --no-music    start with the music off (m toggles it)\n"
 				"  --version     print the version and exit\n");
 			return help ? 0 : 2;
 		}
 	}
-	if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+	if (!is_terminal()) {
 		fputs("termtris: needs a terminal\n", stderr);
 		return 1;
 	}
 
 	init_shapes();
-	g.rng = (uint32_t)now_ns() ^ (uint32_t)getpid() << 16;
+	g.rng = (uint32_t)now_ns() ^ process_id() << 16;
 	if (!g.rng)
 		g.rng = 1;
 	g.preview = true;
 	load_hiscore();
 
 	term_init();
-	g.precise = probe_terminal() && !basic;
+	g.precise = probe_terminal();
 	init_colors();
 	music_start();
-	if (g.precise)
-		wr("\x1b[>11u"); /* disambiguate + report releases + all keys as escapes */
 	resize();
 	run();
 	return 0;

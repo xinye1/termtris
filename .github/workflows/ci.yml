@@ -7,17 +7,38 @@ on:
     types: [opened, reopened, ready_for_review]
   workflow_dispatch:
 
+env:
+  CFLAGS: -O2 -Wall -Wextra -std=c11 -pedantic -Werror
+
 jobs:
   linux:
     if: github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
-    env:
-      CFLAGS: -O2 -Wall -Wextra -std=c11 -pedantic -Werror
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build
         run: make
       - name: Test
         run: make test
       - name: Version
         run: ./termtris --version
+
+  windows:
+    if: github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: mingw-w64-ucrt-x86_64-gcc make
+      - name: Build
+        run: make LDFLAGS=-static
+      - name: Test
+        run: make test LDFLAGS=-static
+      - name: Version
+        run: ./termtris.exe --version

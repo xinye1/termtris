@@ -1,6 +1,33 @@
-/* Headless tests for the game rules and the input parser. */
+/* Headless tests for the game rules, the input parsers and the synth. */
 #define TERMTRIS_NO_MAIN
 #include "termtris.c"
+
+/* The high score lives under $XDG_DATA_HOME, or %APPDATA% on Windows. */
+#ifdef _WIN32
+#include <io.h>
+#define DATA_VAR "APPDATA"
+static void set_env(const char *k, const char *v) { _putenv_s(k, v); }
+static void remove_path(const char *p)
+{
+	if (remove(p))
+		_rmdir(p);
+}
+static bool make_temp_dir(char *buf, size_t n)
+{
+	const char *tmp = getenv("TEMP");
+	snprintf(buf, n, "%s\\termtris-test-XXXXXX", tmp ? tmp : ".");
+	return !_mktemp_s(buf, strlen(buf) + 1) && !_mkdir(buf);
+}
+#else
+#define DATA_VAR "XDG_DATA_HOME"
+static void set_env(const char *k, const char *v) { setenv(k, v, 1); }
+static void remove_path(const char *p) { remove(p); } /* files and empty folders */
+static bool make_temp_dir(char *buf, size_t n)
+{
+	snprintf(buf, n, "/tmp/termtris-test-XXXXXX");
+	return mkdtemp(buf) != NULL;
+}
+#endif
 
 static int fails, checks;
 #define CHECK(c)                                                              \
@@ -340,7 +367,7 @@ static void test_hiscore(const char *dir)
 {
 	char xdg[512];
 	snprintf(xdg, sizeof xdg, "%s/no/such/share", dir); /* parents missing */
-	setenv("XDG_DATA_HOME", xdg, 1);
+	set_env(DATA_VAR, xdg);
 	g.hiscore = 4321;
 	save_hiscore();
 	g.hiscore = 0;
@@ -355,9 +382,9 @@ static void test_hiscore(const char *dir)
 	for (size_t i = 0; i < sizeof made / sizeof *made; i++) {
 		char path[600];
 		snprintf(path, sizeof path, "%s%s", dir, made[i]);
-		remove(path);
+		remove_path(path);
 	}
-	setenv("XDG_DATA_HOME", dir, 1);
+	set_env(DATA_VAR, dir);
 }
 
 static void test_song(void)
@@ -431,12 +458,93 @@ static void test_theme(void)
 	CHECK(!shaded && dot_color == PAL(8));
 }
 
+static void test_synth(void)
+{
+	enum { N = 4096 };
+	static int16_t a[N], b[N];
+	Synth s1 = { 0 }, s2 = { 0 };
+	synth_init();
+	synth_render(&s1, a, N);
+	synth_render(&s2, b, N);
+	CHECK(!memcmp(a, b, sizeof a)); /* a rewind replays the same sound */
+	int peak = 0;
+	for (int i = 0; i < N; i++)
+		peak = abs(a[i]) > peak ? abs(a[i]) : peak;
+	CHECK(peak > 1000 && peak < 20000); /* audible, far from clipping */
+	long cycle = (long)PASSES * SONG_EIGHTHS * EIGHTH;
+	s1.pos = cycle - 10;
+	synth_render(&s1, a, 20);
+	CHECK(s1.pos == 10); /* loops back to the top */
+}
+
+#ifdef _WIN32
+static INPUT_RECORD key_rec(WORD vk, bool down, DWORD state)
+{
+	INPUT_RECORD r = { .EventType = KEY_EVENT };
+	r.Event.KeyEvent.bKeyDown = down;
+	r.Event.KeyEvent.wRepeatCount = 1;
+	r.Event.KeyEvent.wVirtualKeyCode = vk;
+	r.Event.KeyEvent.dwControlKeyState = state;
+	return r;
+}
+
+static void feed_key(WORD vk, bool down, DWORD state)
+{
+	INPUT_RECORD r = key_rec(vk, down, state);
+	handle_record(&r);
+}
+
+static void test_windows_keys(void)
+{
+	setup(PT, 0);
+	g.precise = false;
+	memset(key_down, 0, sizeof key_down);
+	/* before any release arrives, presses and OS repeats each move once */
+	feed_key(VK_RIGHT, true, 0);
+	feed_key(VK_RIGHT, true, 0);
+	CHECK(g.px == 7 && !g.precise && g.held_dir == 0);
+	/* the first release switches precise keys on */
+	feed_key(VK_RIGHT, false, 0);
+	CHECK(g.precise);
+	/* now holding auto-shifts on the game's timing; OS repeats are ignored */
+	feed_key(VK_LEFT, true, 0);
+	feed_key(VK_LEFT, true, 0);
+	CHECK(g.px == 6 && g.held_dir == -1);
+	ticks(DAS);
+	CHECK(g.px == 5);
+	feed_key(VK_LEFT, false, 0);
+	CHECK(g.held_dir == 0);
+	/* letters map like the Unix keys; Ctrl+C quits */
+	feed_key('G', true, 0);
+	CHECK(g.ghost);
+	feed_key('C', true, LEFT_CTRL_PRESSED);
+	CHECK(g.quit);
+
+	/* losing focus pauses and forgets held keys */
+	setup(PT, 0);
+	memset(key_down, 0, sizeof key_down);
+	feed_key(VK_LEFT, true, 0);
+	INPUT_RECORD f = { .EventType = FOCUS_EVENT };
+	f.Event.FocusEvent.bSetFocus = FALSE;
+	handle_record(&f);
+	CHECK(g.state == ST_PAUSE && g.held_dir == 0 && !key_down[K_LEFT]);
+
+	/* --basic-keys never switches to precise keys */
+	setup(PT, 0);
+	g.precise = false;
+	force_basic = true;
+	feed_key(VK_RIGHT, false, 0);
+	CHECK(!g.precise);
+	force_basic = false;
+}
+#endif
+
 int main(void)
 {
-	char dir[] = "/tmp/termtris-test-XXXXXX";
-	if (!mkdtemp(dir))
+	char dir[512];
+	if (!make_temp_dir(dir, sizeof dir))
 		return 1;
-	setenv("XDG_DATA_HOME", dir, 1); /* keep the real high score untouched */
+	set_env(DATA_VAR, dir); /* keep the real high score untouched */
 	init_shapes();
 
 	test_shapes();
@@ -454,8 +562,12 @@ int main(void)
 	test_hiscore(dir);
 	test_arrangement();
 	test_theme();
+	test_synth();
+#ifdef _WIN32
+	test_windows_keys();
+#endif
 
-	rmdir(dir);
+	remove_path(dir);
 	printf("%d/%d checks passed\n", checks - fails, checks);
 	return fails != 0;
 }
