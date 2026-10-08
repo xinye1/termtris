@@ -448,7 +448,7 @@ static void test_theme(void)
 	init_colors();
 	CHECK(shaded);
 	CHECK(base_rgb[PL] == mix(0xcc241d, 0xd79921, 50));
-	CHECK(dot_color == RGB(mix(0x282828, 0xebdbb2, 28)));
+	CHECK(dot_color == RGB24(mix(0x282828, 0xebdbb2, 28)));
 	CHECK(mix(0xffffff, 0, 50) == 0x808080 && darken(0x646464, 50) == 0x323232);
 
 	/* nothing reported: flat palette colours, no shading */

@@ -623,7 +623,7 @@ static void save_hiscore(void)
  */
 typedef uint32_t Color;
 #define PAL(n) (0x1000000u | (uint32_t)(n))
-#define RGB(c) (0x2000000u | (uint32_t)(c))
+#define RGB24(c) (0x2000000u | (uint32_t)(c))
 
 /* Theme colours the terminal reported: palette 0-15, then fg and bg. */
 enum { TH_FG = 16, TH_BG, TH_N };
@@ -663,7 +663,7 @@ static void init_colors(void)
 		}
 	}
 	if (have(TH_FG) && have(TH_BG))
-		dot_color = RGB(mix(theme_rgb[TH_BG], theme_rgb[TH_FG], 28));
+		dot_color = RGB24(mix(theme_rgb[TH_BG], theme_rgb[TH_FG], 28));
 }
 
 static int hexval(int c) { return isdigit(c) ? c - '0' : tolower(c) - 'a' + 10; }
@@ -818,15 +818,15 @@ static void draw_brick(int sx, int sy, int piece, bool ghost)
 	} else if (!shaded) {
 		put(sx, sy, ghost ? "░░" : "██", PAL(piece_pal[piece]), 0, 0);
 	} else if (ghost) {
-		put(sx, sy, "░░", RGB(base_rgb[piece]), 0, 0);
+		put(sx, sy, "░░", RGB24(base_rgb[piece]), 0, 0);
 	} else {
 		/*
 		 * Lit from the top left: the right half is a shade darker and a
 		 * hairline shadow runs along the bottom edge.
 		 */
 		uint32_t c = base_rgb[piece];
-		put(sx, sy, "▁", RGB(darken(c, 30)), RGB(c), 0);
-		put(sx + 1, sy, "▁", RGB(darken(c, 36)), RGB(darken(c, 8)), 0);
+		put(sx, sy, "▁", RGB24(darken(c, 30)), RGB24(c), 0);
+		put(sx + 1, sy, "▁", RGB24(darken(c, 36)), RGB24(darken(c, 8)), 0);
 	}
 }
 
