@@ -78,3 +78,8 @@ The ghost piece is off by default, as in the originals.
 
 The high score is kept in `$XDG_DATA_HOME/termtris/highscore`
 (`~/.local/share/termtris/highscore` by default).
+
+## License
+
+MIT, see [LICENSE](LICENSE). Korobeiniki is a 19th-century folk song in the public domain; the
+arrangement in `termtris.c` is part of this project and covered by the same licence.
