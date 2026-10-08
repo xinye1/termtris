@@ -32,6 +32,9 @@
 #include <time.h>
 #include <unistd.h>
 
+/* Bumped for each release; the release workflow checks it matches the tag. */
+#define TERMTRIS_VERSION "0.1.0-beta.2"
+
 enum { W = 10, H = 20, FPS = 60 };
 
 /* Timings, in 60 Hz frames. */
@@ -1442,12 +1445,16 @@ int main(int argc, char **argv)
 			basic = true;
 		} else if (!strcmp(argv[i], "--no-music")) {
 			g.music = false;
+		} else if (!strcmp(argv[i], "-v") || !strcmp(argv[i], "--version")) {
+			puts("termtris " TERMTRIS_VERSION);
+			return 0;
 		} else {
 			bool help = !strcmp(argv[i], "-h") || !strcmp(argv[i], "--help");
 			fprintf(help ? stdout : stderr,
-				"usage: termtris [--basic-keys] [--no-music]\n"
+				"usage: termtris [--basic-keys] [--no-music] [--version]\n"
 				"  --basic-keys  ignore the kitty keyboard protocol and use plain key presses\n"
-				"  --no-music    start with the music off (m toggles it)\n");
+				"  --no-music    start with the music off (m toggles it)\n"
+				"  --version     print the version and exit\n");
 			return help ? 0 : 2;
 		}
 	}

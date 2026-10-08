@@ -10,6 +10,8 @@ make test       # rules and input-parser tests
 make install    # copies to ~/.local/bin (PREFIX=... to change)
 ```
 
+`termtris --version` prints the version.
+
 ## Rules
 
 It plays like the 1989 NES game, drawn like the 1984 original:
