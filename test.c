@@ -217,6 +217,12 @@ static void test_soft_drop(void)
 	on_key(K_DOWN, EV_RELEASE);
 	ticks(SOFT * 4);
 	CHECK(g.py == 2);
+
+	/* at levels 19-28 gravity matches soft drop, which must still score */
+	setup(PT, 19);
+	on_key(K_DOWN, EV_PRESS);
+	ticks(SOFT * 4);
+	CHECK(g.py == 5 && g.soft_rows == 5);
 }
 
 static void test_game_over(void)
@@ -313,8 +319,12 @@ static void test_parser(void)
 	CHECK(nev == 0);
 	feed("hjkl xzq\x03\r");
 	CHECK(nev == 10 && evs[0][0] == K_LEFT && evs[2][0] == K_CW && evs[8][0] == K_QUIT);
+	g.precise = false;
 	feed("\x1b");
 	CHECK(nev == 1 && evs[0][0] == K_PAUSE);
+	g.precise = true; /* Esc is CSI 27 u here, so a bare Esc is a split read */
+	CHECK(feed("\x1b") == 0 && nev == 0);
+	CHECK(feed("x\x1b") == 1 && nev == 1);
 	feed("\x1b[O\x1b[I");
 	CHECK(nev == 1 && evs[0][0] == K_FOCUS_OUT);
 	CHECK(feed("x\x1b[1;1:") == 1); /* an unfinished sequence waits for more */

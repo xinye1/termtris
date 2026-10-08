@@ -1,7 +1,8 @@
 # termtris
 
 A small, faithful Tetris for the terminal: one C file, no libraries beyond
-libc, a ~40 KB binary that uses about 2 MB of memory.
+libc, a ~40 KB binary that uses about 2 MB of memory. Linux only: the music
+and input handling use Linux-specific calls.
 
 ```sh
 make            # build

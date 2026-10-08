@@ -286,7 +286,7 @@ static bool tick(void)
 		changed = true;
 	}
 	int fpr = frames_per_row(g.level);
-	if (g.soft_held && g.soft_armed && SOFT < fpr) {
+	if (g.soft_held && g.soft_armed && SOFT <= fpr) { /* scores even at equal speed */
 		if (++g.soft_timer >= SOFT) {
 			g.soft_timer = 0;
 			fall(true);
@@ -388,6 +388,8 @@ static size_t parse(const unsigned char *b, size_t n, emit_fn emit)
 			continue;
 		}
 		if (i + 1 == n) { /* a lone Esc */
+			if (g.precise) /* Esc arrives as CSI 27 u: this is a split sequence */
+				return i;
 			emit(K_PAUSE, EV_PRESS);
 			i++;
 			continue;
