@@ -537,6 +537,59 @@ static void test_windows_keys(void)
 	CHECK(!g.precise);
 	force_basic = false;
 }
+
+static void feed_char(wchar_t c)
+{
+	INPUT_RECORD r = key_rec(c >= 'a' && c <= 'z' ? (WORD)(c - 'a' + 'A') : c == 27 ? VK_ESCAPE : 0,
+				 true, 0);
+	r.Event.KeyEvent.uChar.UnicodeChar = c;
+	handle_record(&r);
+}
+
+static void feed_text(const char *s)
+{
+	while (*s)
+		feed_char((unsigned char)*s++);
+}
+
+static void replies_pending(int64_t ns)
+{
+	replies_done = false;
+	reply_state = 0;
+	replies_deadline = now_ns() + ns;
+}
+
+static void test_windows_late_replies(void)
+{
+	/* late colour replies are swallowed, not read as r/g/c key presses */
+	setup(PT, 0);
+	memset(key_down, 0, sizeof key_down);
+	replies_pending(5000000000LL);
+	feed_text("\x1b]4;1;rgb:cccc/2424/1d1d\x1b\\");
+	feed_text("\x1b]11;rgb:28/28/28\x07");
+	CHECK(!g.ghost && !g.classic && g.state == ST_PLAY);
+	/* the device-attributes reply is the last; keys work normally after it */
+	feed_text("\x1b[?62;22c");
+	CHECK(replies_done);
+	feed_char('g');
+	CHECK(g.ghost);
+
+	/* a real Esc still pauses, once the next key shows it began no reply */
+	setup(PT, 0);
+	memset(key_down, 0, sizeof key_down);
+	replies_pending(5000000000LL);
+	feed_char(27);
+	CHECK(g.state == ST_PLAY); /* held back */
+	feed_key(VK_LEFT, true, 0);
+	CHECK(g.state == ST_PAUSE);
+
+	/* after the deadline the filter stops */
+	setup(PT, 0);
+	memset(key_down, 0, sizeof key_down);
+	replies_pending(-1);
+	feed_char('g');
+	CHECK(g.ghost && replies_done);
+}
 #endif
 
 int main(void)
@@ -565,6 +618,7 @@ int main(void)
 	test_synth();
 #ifdef _WIN32
 	test_windows_keys();
+	test_windows_late_replies();
 #endif
 
 	remove_path(dir);

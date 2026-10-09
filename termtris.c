@@ -1606,6 +1606,50 @@ static UINT orig_cp;
 static volatile LONG got_quit;
 static bool key_down[K_COUNT];
 
+/*
+ * If the device-attributes reply hasn't arrived when the probe gives up (a
+ * slow host), the rest of the replies arrive later as typed characters. Until
+ * it does, or for 5 s at most, characters that form a reply are swallowed
+ * instead of read as keys. An Esc is held back until the next character shows
+ * whether it starts a reply or was the Esc key.
+ */
+enum { REPLY = 1, ESC_FIRST = 2 };
+static int reply_state; /* 0 outside a reply, 1 after Esc, 2 in CSI, 3 in OSC, 4 OSC after Esc */
+static bool replies_done = true;
+static int64_t replies_deadline;
+
+static int reply_char(wchar_t c)
+{
+	switch (reply_state) {
+	case 0:
+		if (c != 27)
+			return 0;
+		reply_state = 1;
+		return REPLY;
+	case 1:
+		if (c == 27) /* Esc Esc: the first was the key */
+			return ESC_FIRST | REPLY;
+		reply_state = c == '[' ? 2 : c == ']' ? 3 : 0;
+		return reply_state ? REPLY : ESC_FIRST;
+	case 2:
+		if (c >= 0x40 && c <= 0x7e) {
+			reply_state = 0;
+			if (c == 'c') /* device attributes: the last reply */
+				replies_done = true;
+		}
+		return REPLY;
+	case 3:
+		if (c == 7)
+			reply_state = 0;
+		else if (c == 27)
+			reply_state = 4;
+		return REPLY;
+	default:
+		reply_state = c == '\\' ? 0 : 3;
+		return REPLY;
+	}
+}
+
 static void term_write(const char *s, size_t n)
 {
 	while (n) {
@@ -1720,12 +1764,16 @@ static bool probe_terminal(void)
 		for (DWORD i = 0; i < got && n + 4 < sizeof buf; i++) {
 			KEY_EVENT_RECORD *ke = &rec[i].Event.KeyEvent;
 			if (rec[i].EventType == KEY_EVENT && ke->bKeyDown && ke->uChar.UnicodeChar &&
-			    ke->uChar.UnicodeChar < 128)
+			    ke->uChar.UnicodeChar < 128) {
 				buf[n++] = (char)ke->uChar.UnicodeChar;
+				reply_char(ke->uChar.UnicodeChar); /* track where a cut-off reply is */
+			}
 		}
 	}
 	SetConsoleMode(hin, ENABLE_WINDOW_INPUT | ENABLE_EXTENDED_FLAGS);
 	parse_theme(buf, n);
+	replies_done = has_reply(buf, n, 'c');
+	replies_deadline = now_ns() + 5000000000LL;
 	return false;
 }
 
@@ -1759,6 +1807,20 @@ static void handle_record(const INPUT_RECORD *rec)
 	}
 	if (rec->EventType != KEY_EVENT)
 		return;
+	if (!replies_done && now_ns() > replies_deadline) {
+		replies_done = true;
+		if (reply_state == 1) /* a held-back Esc was the key */
+			on_key(K_PAUSE, EV_PRESS);
+		reply_state = 0;
+	}
+	if (!replies_done && rec->Event.KeyEvent.bKeyDown) {
+		wchar_t c = rec->Event.KeyEvent.uChar.UnicodeChar;
+		int r = c ? reply_char(c) : reply_state == 1 ? (reply_state = 0, ESC_FIRST) : 0;
+		if (r & ESC_FIRST)
+			on_key(K_PAUSE, EV_PRESS);
+		if (r & REPLY)
+			return;
+	}
 	const KEY_EVENT_RECORD *ke = &rec->Event.KeyEvent;
 	bool ctrl = ke->dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
 	int k = key_for_vk(ke->wVirtualKeyCode, ctrl);
