@@ -22,7 +22,7 @@ Download the exe from the
 [releases](https://github.com/xinye1/termtris/releases) and run it. For this beta:
 
 ```powershell
-$url = "https://github.com/xinye1/termtris/releases/download/v0.1.0-beta.2/termtris-windows-x86_64.exe"
+$url = "https://github.com/xinye1/termtris/releases/download/v0.1.0-beta.3/termtris-windows-x86_64.exe"
 Invoke-WebRequest $url -OutFile termtris.exe
 .\termtris.exe
 ```
