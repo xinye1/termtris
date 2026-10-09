@@ -48,7 +48,7 @@
 #endif
 
 /* Bumped for each release; the release workflow checks it matches the tag. */
-#define TERMTRIS_VERSION "0.1.0-beta.2"
+#define TERMTRIS_VERSION "0.1.0-beta.3"
 
 enum { W = 10, H = 20, FPS = 60 };
 
