@@ -1,16 +1,45 @@
 # termtris
 
 A small, faithful Tetris for the terminal: one C file, no libraries beyond
-libc, a ~40 KB binary that uses about 2 MB of memory. Linux only: the music
-and input handling use Linux-specific calls.
+the C library, a ~40 KB binary that uses about 2 MB of memory. It runs in
+Linux terminals and in PowerShell on Windows 10 or 11.
+
+## Linux
+
+Download `termtris-linux-x86_64` from the
+[releases](https://github.com/xinye1/termtris/releases) (statically linked, so it
+runs on any x86_64 distro), or build it:
 
 ```sh
 make            # build
-make test       # rules and input-parser tests
+make test       # rules, input-parser and synth tests
 make install    # copies to ~/.local/bin (PREFIX=... to change)
 ```
 
-`termtris --version` prints the version.
+## Windows (PowerShell)
+
+Download the exe from the
+[releases](https://github.com/xinye1/termtris/releases) and run it. For this beta:
+
+```powershell
+$url = "https://github.com/xinye1/termtris/releases/download/v0.1.0-beta.2/termtris-windows-x86_64.exe"
+Invoke-WebRequest $url -OutFile termtris.exe
+.\termtris.exe
+```
+
+It works in Windows Terminal (the default on Windows 11) and in the classic
+console window. The exe isn't code-signed, so if Windows blocks it, run
+`Unblock-File .\termtris.exe` once.
+
+To build it yourself, install [MSYS2](https://www.msys2.org), open the
+**UCRT64** shell and run:
+
+```sh
+pacman -S --needed mingw-w64-ucrt-x86_64-gcc make
+make LDFLAGS=-static
+```
+
+`termtris --version` prints the version on either system.
 
 ## Rules
 
@@ -33,7 +62,8 @@ The ghost piece is off by default, as in the originals.
 - The well is drawn exactly as the 1984 original drew it (`<! . . !>`,
   `<!====!>`, `\/\/\/`), with no other decoration. The grid dots are muted.
 - Bricks take their colours from your terminal theme. Where the terminal reports
-  its palette (kitty, Ghostty, foot, WezTerm, Alacritty), bricks get a faint
+  its palette (kitty, Ghostty, foot, WezTerm, Alacritty, and Windows Terminal
+  if your version answers palette queries), bricks get a faint
   bevel, lit from the top left, and L becomes an orange mixed from the theme's
   red and yellow. Elsewhere they are flat theme colours. Press `c` for the
   monochrome `[]` look of the original.
@@ -44,8 +74,9 @@ The ghost piece is off by default, as in the originals.
   melody up an octave over the harmony. The arrangement is termtris's own; the
   Game Boy's slow middle section is Nintendo's composition and isn't included.
   The notes are stored as MIDI note numbers and played by a tiny built-in
-  pulse-and-triangle synth (Game Boy style) through `pw-play`, `paplay` or
-  `aplay`, whichever is installed. It plays only during a game, restarts with
+  pulse-and-triangle synth (Game Boy style): on Linux through `pw-play`,
+  `paplay` or `aplay`, whichever is installed; on Windows through the
+  built-in audio API. It plays only during a game, restarts with
   each new game, and stops on pause. `m` toggles it; `--no-music` starts muted.
 
 ## Keys
@@ -74,12 +105,15 @@ The ghost piece is off by default, as in the originals.
   a direction no longer depends on your OS key-repeat settings, and a held
   direction stays charged through line clears. The title screen shows
   `precise keys` when this is active.
+- On Windows the console reports key releases itself, so the same auto-shift
+  works in PowerShell. It switches on with the first key you let go of.
 - Other terminals (and tmux) fall back to plain key presses (`basic keys`).
   Run with `--basic-keys` to force that.
 - Losing window focus pauses the game.
 
 The high score is kept in `$XDG_DATA_HOME/termtris/highscore`
-(`~/.local/share/termtris/highscore` by default).
+(`~/.local/share/termtris/highscore` by default), or
+`%APPDATA%\termtris\highscore` on Windows.
 
 ## License
 
