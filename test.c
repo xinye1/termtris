@@ -583,6 +583,28 @@ static void test_windows_late_replies(void)
 	feed_key(VK_LEFT, true, 0);
 	CHECK(g.state == ST_PAUSE);
 
+	/*
+	 * replies cut off by the probe deadline (mid-OSC and mid-CSI) are still
+	 * recognised when their rest arrives as typed characters
+	 */
+	static const char *const cut[][2] = {
+		{ "\x1b]4;1;rgb:ccc", "c/2424/1d1d\x1b\\\x1b[?62;22c" }, /* one c: a toggle shows */
+		{ "\x1b[?6", "2;22c" },
+	};
+	for (size_t i = 0; i < sizeof cut / sizeof *cut; i++) {
+		char buf[64];
+		size_t n = 0;
+		setup(PT, 0);
+		memset(key_down, 0, sizeof key_down);
+		reply_state = 0;
+		for (const char *p = cut[i][0]; *p; p++)
+			probe_char(buf, &n, (unsigned char)*p);
+		probe_done(buf, n);
+		CHECK(!replies_done);
+		feed_text(cut[i][1]);
+		CHECK(!g.classic && replies_done); /* the 'c's were reply, not keys */
+	}
+
 	/* after the deadline the filter stops */
 	setup(PT, 0);
 	memset(key_down, 0, sizeof key_down);

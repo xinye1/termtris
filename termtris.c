@@ -1741,6 +1741,24 @@ static int64_t now_ns(void)
 static uint32_t process_id(void) { return (uint32_t)GetCurrentProcessId(); }
 
 /*
+ * One character of the probe's input: keep it for parse_theme, and track
+ * where a reply cut off by the deadline is, so its rest is recognised later.
+ */
+static void probe_char(char *buf, size_t *n, wchar_t c)
+{
+	buf[(*n)++] = (char)c;
+	reply_char(c);
+}
+
+/* After the probe: read the colours; until the last reply comes, filter replies. */
+static void probe_done(const char *buf, size_t n)
+{
+	parse_theme(buf, n);
+	replies_done = has_reply(buf, n, 'c');
+	replies_deadline = now_ns() + 5000000000LL;
+}
+
+/*
  * The console answers queries by injecting the reply as typed characters, so
  * collect those until the device-attributes reply arrives. Key releases are
  * not probed: the first one that arrives switches precise keys on.
@@ -1764,16 +1782,12 @@ static bool probe_terminal(void)
 		for (DWORD i = 0; i < got && n + 4 < sizeof buf; i++) {
 			KEY_EVENT_RECORD *ke = &rec[i].Event.KeyEvent;
 			if (rec[i].EventType == KEY_EVENT && ke->bKeyDown && ke->uChar.UnicodeChar &&
-			    ke->uChar.UnicodeChar < 128) {
-				buf[n++] = (char)ke->uChar.UnicodeChar;
-				reply_char(ke->uChar.UnicodeChar); /* track where a cut-off reply is */
-			}
+			    ke->uChar.UnicodeChar < 128)
+				probe_char(buf, &n, ke->uChar.UnicodeChar);
 		}
 	}
 	SetConsoleMode(hin, ENABLE_WINDOW_INPUT | ENABLE_EXTENDED_FLAGS);
-	parse_theme(buf, n);
-	replies_done = has_reply(buf, n, 'c');
-	replies_deadline = now_ns() + 5000000000LL;
+	probe_done(buf, n);
 	return false;
 }
 
