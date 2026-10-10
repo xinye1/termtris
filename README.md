@@ -4,6 +4,8 @@ A small, faithful Tetris for the terminal: one C file, no libraries beyond
 the C library, a ~40 KB binary that uses about 2 MB of memory. It runs in
 Linux terminals and in PowerShell on Windows 10 or 11.
 
+![termtris mid-game: the well drawn with `<! . . !>` walls, bevelled bricks in the terminal's theme colours, and score, level, lines, high score and next piece on the right](screenshots/termtris.png)
+
 ## Linux
 
 Download `termtris-linux-x86_64` from the
@@ -61,6 +63,8 @@ The ghost piece is off by default, as in the originals.
 
 - The well is drawn exactly as the 1984 original drew it (`<! . . !>`,
   `<!====!>`, `\/\/\/`), with no other decoration. The grid dots are muted.
+  The side panel shows score, level, lines, high score, the next piece and a
+  key reminder (the screenshot above).
 - Bricks take their colours from your terminal theme. Where the terminal reports
   its palette (kitty, Ghostty, foot, WezTerm, Alacritty, and Windows Terminal
   if your version answers palette queries), bricks get a faint
